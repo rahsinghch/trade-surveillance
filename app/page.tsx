@@ -120,11 +120,17 @@ export default function Dashboard() {
   const [clock, setClock] = useState('');
   const [autoTriageRunning, setAutoTriageRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dataSource, setDataSource] = useState<'synthetic' | 'upload' | 'market'>('synthetic');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [marketSymbols, setMarketSymbols] = useState('HDFCBANK.NS, RELIANCE.NS');
+  const [isUploading, setIsUploading] = useState(false);
+  const [isFetchingMarket, setIsFetchingMarket] = useState(false);
 
   const replayIdxRef = useRef(0);
   const replayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const feedRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Live clock
   useEffect(() => {
@@ -261,6 +267,59 @@ export default function Dashboard() {
     setAutoTriageRunning(false);
   };
 
+  const loadData = useCallback(
+    (data: { trades: TradeOrder[]; alerts: SuspiciousAlert[] }) => {
+      setAllTrades(data.trades);
+      setAlerts(data.alerts);
+      setDisplayedTrades([]);
+      setTriageMap({});
+      setEscalationLog([]);
+      setSelectedAlertId(null);
+      replayIdxRef.current = 0;
+      setIsReplaying(true);
+    },
+    [],
+  );
+
+  const handleUpload = useCallback(async () => {
+    if (!uploadFile) return;
+    setError(null);
+    setIsUploading(true);
+    try {
+      const form = new FormData();
+      form.append('file', uploadFile);
+      const res = await fetch('/api/upload', { method: 'POST', body: form });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.error ?? 'Upload failed'); }
+      loadData(await res.json());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Upload failed');
+    } finally {
+      setIsUploading(false);
+    }
+  }, [uploadFile, loadData]);
+
+  const handleFetchMarket = useCallback(async () => {
+    if (!marketSymbols.trim()) return;
+    setError(null);
+    setIsFetchingMarket(true);
+    try {
+      const symbols = marketSymbols.split(',').map(s => s.trim()).filter(Boolean);
+      const res = await fetch('/api/fetch-market', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbols }),
+      });
+      if (!res.ok) { const e = await res.json(); throw new Error(e.error ?? 'Fetch failed'); }
+      const data = await res.json();
+      if (data.warnings?.length) setError(`${data.warnings.join(' | ')}`);
+      loadData(data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Market fetch failed');
+    } finally {
+      setIsFetchingMarket(false);
+    }
+  }, [marketSymbols, loadData]);
+
   // ─── Derived stats ──────────────────────────────────────────────────────────
 
   const suspicious = displayedTrades.filter(t => t.isSuspicious).length;
@@ -324,56 +383,159 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* ── Controls ── */}
-      <div className="px-4 pt-3 flex flex-wrap items-center gap-3">
-        <button
-          onClick={handleGenerate}
-          disabled={isGenerating || isReplaying}
-          className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
-        >
-          {isGenerating ? (
-            <><span className="animate-spin">⟳</span> Generating…</>
-          ) : isReplaying ? (
-            <><span className="animate-pulse">▶</span> Replaying…</>
-          ) : (
-            '⚡ Generate Trade Dataset'
-          )}
-        </button>
+      {/* ── Data Source Controls ── */}
+      <div className="px-4 pt-3 space-y-2">
 
-        {alerts.length > 0 && (
-          <button
-            onClick={handleAutoTriage}
-            disabled={autoTriageRunning || triagingId !== null || alerts.every(a => a.status !== 'PENDING')}
-            className="bg-purple-700 hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
-          >
-            {autoTriageRunning ? <><span className="animate-pulse">🤖</span> Auto-triaging…</> : '🤖 Auto-Triage All'}
-          </button>
-        )}
+        {/* Tab bar */}
+        <div className="flex gap-1 bg-slate-900 border border-slate-800 rounded-lg p-1 w-fit">
+          {([
+            ['synthetic', '⚡', 'Synthetic Data'],
+            ['upload',    '📁', 'Upload File'],
+            ['market',    '🌐', 'Market Feed'],
+          ] as const).map(([mode, icon, label]) => (
+            <button
+              key={mode}
+              onClick={() => { setDataSource(mode); setError(null); }}
+              className={`px-3 py-1.5 rounded text-xs font-semibold transition-colors ${
+                dataSource === mode
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              {icon} {label}
+            </button>
+          ))}
+        </div>
 
-        {isReplaying && (
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <span>Speed:</span>
-            {[1, 5, 10].map(s => (
+        {/* Synthetic */}
+        {dataSource === 'synthetic' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={handleGenerate}
+              disabled={isGenerating || isReplaying}
+              className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
+            >
+              {isGenerating ? <><span className="animate-spin">⟳</span> Generating…</> : isReplaying ? <><span className="animate-pulse">▶</span> Replaying…</> : '⚡ Generate Trade Dataset'}
+            </button>
+            {alerts.length > 0 && (
               <button
-                key={s}
-                onClick={() => setReplaySpeed(s)}
-                className={`px-2 py-1 rounded transition-colors ${replaySpeed === s ? 'bg-slate-600 text-white' : 'bg-slate-800 hover:bg-slate-700'}`}
+                onClick={handleAutoTriage}
+                disabled={autoTriageRunning || triagingId !== null || alerts.every(a => a.status !== 'PENDING')}
+                className="bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
               >
-                {s}x
+                {autoTriageRunning ? '🤖 Auto-triaging…' : '🤖 Auto-Triage All'}
               </button>
-            ))}
+            )}
           </div>
         )}
 
-        {isReplaying && (
-          <span className="text-slate-500 text-xs">
-            {displayedTrades.length} / {allTrades.length} trades
-          </span>
+        {/* Upload */}
+        {dataSource === 'upload' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <div
+              className="border-2 border-dashed border-slate-700 hover:border-slate-500 rounded-lg px-4 py-2.5 cursor-pointer transition-colors min-w-64"
+              onClick={() => fileInputRef.current?.click()}
+              onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) setUploadFile(f); }}
+              onDragOver={e => e.preventDefault()}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,.json"
+                className="hidden"
+                onChange={e => setUploadFile(e.target.files?.[0] ?? null)}
+              />
+              {uploadFile ? (
+                <span className="text-sm text-slate-200">
+                  📄 {uploadFile.name}
+                  <span className="text-slate-500 text-xs ml-2">({(uploadFile.size / 1024).toFixed(1)} KB)</span>
+                </span>
+              ) : (
+                <span className="text-sm text-slate-500">
+                  Drop <span className="text-slate-400">CSV</span> / <span className="text-slate-400">JSON</span> here or <span className="text-blue-400 underline">browse</span>
+                </span>
+              )}
+            </div>
+            <button
+              onClick={handleUpload}
+              disabled={!uploadFile || isUploading}
+              className="bg-green-700 hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors"
+            >
+              {isUploading ? '⟳ Processing…' : '▶ Ingest File'}
+            </button>
+            <a href="/sample-trades.csv" download className="text-xs text-blue-400 hover:text-blue-300 hover:underline transition-colors">
+              ↓ Sample CSV
+            </a>
+            {alerts.length > 0 && (
+              <button
+                onClick={handleAutoTriage}
+                disabled={autoTriageRunning || triagingId !== null || alerts.every(a => a.status !== 'PENDING')}
+                className="bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-semibold"
+              >
+                {autoTriageRunning ? '🤖 Auto-triaging…' : '🤖 Auto-Triage All'}
+              </button>
+            )}
+            <p className="text-[10px] text-slate-600 w-full mt-0.5">
+              CSV columns: orderId, traderId, instrument, exchange, orderType, quantity, price, timestamp, status, cancelledAt
+            </p>
+          </div>
         )}
 
-        {error && (
-          <span className="text-red-400 text-xs bg-red-500/10 px-3 py-1 rounded-full">⚠ {error}</span>
+        {/* Market Feed */}
+        {dataSource === 'market' && (
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              value={marketSymbols}
+              onChange={e => setMarketSymbols(e.target.value)}
+              placeholder="HDFCBANK.NS, RELIANCE.NS, TCS.NS"
+              className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 w-80 focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={handleFetchMarket}
+              disabled={isFetchingMarket || !marketSymbols.trim()}
+              className="bg-teal-700 hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
+            >
+              {isFetchingMarket ? <><span className="animate-spin">⟳</span> Fetching…</> : '🌐 Fetch Live Data'}
+            </button>
+            <span className="text-xs text-slate-500">
+              Yahoo Finance · NSE: <code className="text-slate-400">.NS</code> · BSE: <code className="text-slate-400">.BO</code> · max 5 symbols
+            </span>
+            {alerts.length > 0 && (
+              <button
+                onClick={handleAutoTriage}
+                disabled={autoTriageRunning || triagingId !== null || alerts.every(a => a.status !== 'PENDING')}
+                className="bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-semibold"
+              >
+                {autoTriageRunning ? '🤖 Auto-triaging…' : '🤖 Auto-Triage All'}
+              </button>
+            )}
+          </div>
         )}
+
+        {/* Shared: replay progress + error */}
+        {(isReplaying || error) && (
+          <div className="flex flex-wrap items-center gap-3">
+            {isReplaying && (
+              <>
+                <span className="text-slate-500 text-xs">{displayedTrades.length} / {allTrades.length} trades</span>
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <span>Speed:</span>
+                  {[1, 5, 10].map(s => (
+                    <button
+                      key={s}
+                      onClick={() => setReplaySpeed(s)}
+                      className={`px-2 py-1 rounded transition-colors ${replaySpeed === s ? 'bg-slate-600 text-white' : 'bg-slate-800 hover:bg-slate-700'}`}
+                    >
+                      {s}x
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+            {error && <span className="text-red-400 text-xs bg-red-500/10 px-3 py-1 rounded-full">⚠ {error}</span>}
+          </div>
+        )}
+
       </div>
 
       {/* ── Main Three-Column Layout ── */}
