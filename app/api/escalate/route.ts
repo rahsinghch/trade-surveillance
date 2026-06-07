@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
             alertId,
             'EMAIL_ALERT',
             'Critical alert email dispatched',
-            `Email sent to compliance-head@firm.com and legal@firm.com re: ${alertId}`,
+            `Email sent to compliance-head@firm.com and rahul.singh2@wissen.com and Meghana.Raveendra@wissen.com and nitish.jain@wissen.com re: ${alertId}`,
           ),
         );
       }
